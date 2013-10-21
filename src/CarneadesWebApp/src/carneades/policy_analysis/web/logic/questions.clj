@@ -3,8 +3,7 @@
 
 (ns ^{:doc "Get questions and translation from formal logic statements to human languages"}
   carneades.policy-analysis.web.logic.questions
-  (:use clojure.data.json
-        clojure.pprint
+  (:use clojure.pprint
         carneades.policy-analysis.web.core
         carneades.engine.statement
         [carneades.engine.unify :only (genvar apply-substitutions)]
@@ -12,12 +11,13 @@
         [carneades.database.export :only [export-to-argument-graph]]
         [carneades.database.evaluation :only [evaluate-graph]])
   (:require [clojure.string :as s]
-            [carneades.engine.scheme :as scheme]
+            [carneades.engine.theory :as scheme]
             [carneades.database.db :as db]
             [carneades.database.argument-graph :as ag-db]
             [carneades.project.admin :as project]
             [carneades.engine.policy :as policy]
-            [carneades.engine.argument-graph :as ag]))
+            [carneades.engine.argument-graph :as ag]
+            [carneades.engine.theory.translation :as ttr]))
 
 (defn functional?
   [role]
@@ -30,14 +30,21 @@
 
 (defn- get-question-text
   [stmt policy lang]
-  (let [predicate (get-predicate stmt policy)]
+  (let [predicate (get-predicate stmt policy)
+        translator (ttr/make-language-translator (:language policy))]
     (cond (and (scheme/role? predicate)
                (coll? (:type predicate)))
           (let [[s o v] stmt
                 stmt2 (list s o (genvar))]
-            (scheme/format-statement stmt2 (:language policy) lang :positive))
-          (ground? stmt) (scheme/format-statement stmt (:language policy) lang :question)
-          :else (scheme/format-statement stmt (:language policy) lang :positive))))
+            (:translation (translator {:literal stmt2
+                                       :lang lang
+                                       :direction :positive})))
+          (ground? stmt) (:translation (translator {:literal stmt
+                                                    :lang lang
+                                                    :direction :question}))
+          :else (:translation (translator {:literal stmt
+                                           :lang lang
+                                           :direction :positive})))))
 
 (defn- get-hint
   [questiondata lang]
@@ -47,6 +54,8 @@
   "Returns the category and the category name"
   [policy pred lang]
   (let [category_key (-> policy :language pred :category)
+        _ (prn "category_key=" category_key)
+        _ (prn "lang=" lang)
         category_name (-> policy :language category_key :text lang)]
     [category_key category_name]))
 
@@ -189,6 +198,7 @@ default-fn is a function returning the default formalized answer for a question.
   ([stmt lang last-id policy]
      (get-structured-questions stmt lang last-id policy (constantly nil)))
   ([stmt lang last-id policy default-fn]
+     {:pre [(not (nil? lang))]}
      (let [id (inc last-id)
            pred (literal-predicate stmt)
            questions (get-questions id stmt (keyword lang) policy default-fn)]
@@ -219,7 +229,7 @@ default-fn is a function returning the default formalized answer for a question.
   (pprint policy)
   (db/with-db (db/make-connection project dbname "guest" "")
     (let [statements (ag-db/list-statements)]
-      (map :atom (filter (partial askable? policy) statements))))) 
+      (map :atom (filter (partial askable? policy) statements)))))
 
 (defn remove-superfluous-questions
   [questions policy]
@@ -272,7 +282,7 @@ default-fn is a function returning the default formalized answer for a question.
                               (let [obj (second (term-args s))]
                                (when (= (:value n) 1.0)
                                  [obj])))))
- 
+
 (defn get-default-values
   [ag policy atoms-by-pred stmt grounded]
   {:post [(do (prn "default values for " stmt " is ") (prn %) true)]}

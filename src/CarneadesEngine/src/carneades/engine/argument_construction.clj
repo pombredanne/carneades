@@ -11,9 +11,10 @@
         carneades.engine.argument-graph
         carneades.engine.argument
         carneades.engine.argument-generator
-        carneades.engine.argument-builtins))
+        carneades.engine.argument-builtins)
+  (:require [clojure.tools.logging :refer [info debug spy]]))
 
-(defrecord ArgumentTemplate 
+(defrecord ArgumentTemplate
   [guard       ; term with all unbound variables of the argument
    instances   ; set of ground terms matching the guard
    argument])  ; partially instantiated argument
@@ -21,7 +22,7 @@
 (defn make-argument-template
   [& values]
   (let [m (apply hash-map values)]
-    (merge (ArgumentTemplate. 
+    (merge (ArgumentTemplate.
             nil    ; guard
             #{}    ; instances
             nil)   ; argument
@@ -33,12 +34,12 @@
   [issues         ; (seq-of literals)  ; open issues
    closed-issues  ; set of literals
    substitutions  ; (term -> term) map
-   depth])        ; int  
+   depth])        ; int
 
 (defn make-goal
    [& values]
    (let [m (apply hash-map values)]
-   (merge (Goal. 
+   (merge (Goal.
              ()     ; issues
             #{}     ; closed issues
              {}     ; substitutions
@@ -47,35 +48,25 @@
 
 (defn- goal? [x] (instance? Goal x))
 
-(defrecord ACState        ; argument construction state    
+(defrecord ACState        ; argument construction state
   [goals                  ; (symbol -> goal) map, where the symbols are goal ids
    open-goals             ; set of goal ids (todo: change to a priority queue)
-   graph                  ; argument-graph 
+   graph                  ; argument-graph
    arg-templates          ; (symbol -> argument template) map; symbols are template ids
    asm-templates])        ; vector of non-ground literals
 
 (defn make-acstate
   [& values]
   (let [m (apply hash-map values)]
-    (merge (ACState. 
+    (merge (ACState.
              {}     ; goals
              '()    ; open goals
-             (make-argument-graph) 
+             (make-argument-graph)
              {}     ; argument templates
              [])    ; assumption templates
            m)))
 
 (defn- acstate? [x] (instance? ACState x))
-
-(defn- initial-acstate
-  "literal argument-graph -> acstate"
-  [issue ag]
-  (let [goal-id (gensym "g")]
-    (make-acstate
-      :goals {goal-id (make-goal :issues (list issue))}
-      :open-goals (list goal-id)  ; #{goal-id}
-      :graph ag)))
-
 
 (defn- add-goal
   "acstate goal -> acstate"
@@ -84,16 +75,26 @@
    :post [(acstate? %)]}
   (let [id (gensym "g")]
     (assoc state1
-           :goals (assoc (:goals state1) id goal)
-           :open-goals (concat (:open-goals state1) (list id))))) ; breadth-first
+      :goals (assoc (:goals state1) id goal)
+      :open-goals (concat (:open-goals state1) (list id)))))
 
+(defn- initial-acstate
+  "(coll-of literal) argument-graph -> acstate"
+  [issues ag]
+  (reduce (fn [state issue]
+            (let [goal (make-goal :issues [issue])]
+             (add-goal state goal)))
+          (make-acstate :graph ag)
+          issues))
+
+;; breadth-first
 (defn- remove-goal
   "acstate symbol -> acstate"
   [state1 goal-id]
-  (assoc state1 
-         :open-goals (rest (:open-goals state1))   
+  (assoc state1
+         :open-goals (rest (:open-goals state1))
          :goals (dissoc (:goals state1) goal-id)))
-                                                                                         
+
 (defn- update-issues
   "acstate goal response -> acstate
    Add a goal to the state by replacing the first issue of the parent goal
@@ -101,31 +102,30 @@
   [state1 g1 response]
   (let [arg (:argument response)
         subs (:substitutions response)
-        closed-issues (conj (:closed-issues g1) 
+        closed-issues (conj (:closed-issues g1)
                             (apply-substitutions subs (first (:issues g1))))]
     (if (nil? arg)
-      (add-goal state1 
-                (make-goal 
+      (add-goal state1
+                (make-goal
                   :issues (rest (:issues g1))
                   :closed-issues closed-issues
                   :substitutions subs
                   :depth (inc (:depth g1))))
-      (let [conclusion (literal->sliteral (conclusion-literal arg))] 
-        ;; undercutter `(~'undercut ~(:id arg))]
-        (add-goal state1 
-                  (make-goal 
+      (let [conclusion (literal->sliteral (conclusion-literal arg))]
+        (add-goal state1
+                  (make-goal
                     ; pop the first issue and add issues for the
                     ; premises and exceptions of the argument to the beginning for
                     ; depth-first search
                     :issues (concat (map (fn [p] (literal->sliteral (premise-literal p)))
                                          (concat (:premises (:argument response))
                                                  (:exceptions (:argument response))))
-                                    ; (list undercutter)                              
+                                    ; (list undercutter)
                                     (rest (:issues g1)))
                     :closed-issues closed-issues
                     :substitutions subs
                     :depth (inc (:depth g1))))))))
-  
+
 
 (defn- add-instance
   "argument-template-map symbol term -> argument-template-map"
@@ -137,8 +137,8 @@
          ]
    :post [(map? %)]}
   (let [arg-template (get arg-template-map key)
-        result (assoc arg-template-map key 
-                      (assoc arg-template 
+        result (assoc arg-template-map key
+                      (assoc arg-template
                         :instances (conj (:instances arg-template) term)))]
     result))
 
@@ -151,16 +151,15 @@
   {:pre [(acstate? s) (argument? arg)]
    :post [(acstate? %)]}
   (let [schemes (schemes-applied (:graph s) (:conclusion arg))]
-    (printf "schemes: %s\n:" schemes)
-    (if (contains? schemes (:scheme arg)) 
+    ;; (printf "schemes: %s\n:" schemes)
+    (if (contains? schemes (:scheme arg))
       ;; the scheme has already been applied to this issue
       ;; Todo: This seems too restrictive.  Consider two
       ;; arguments from expert opinion with the same conclusion,
       ;; but from two different experts.
       s
       (assoc s
-        :graph (enter-arguments (:graph s)
-                                (cons arg (make-undercutters arg)))))))
+        :graph (enter-arguments (:graph s) [arg])))))
 
 (defn- add-argument-instance-to-templates
   "acstate symbol term -> acstate"
@@ -173,11 +172,12 @@
   "acstate goal response -> acstate
    Apply the argument templates to the substitutions of the response, adding
    arguments to the argument graph of the ac-state for all templates with ground
-   guards, if the instance is new.  Add the new instance to the set of instances 
+   guards, if the instance is new.  Add the new instance to the set of instances
    of the template. Also add an undercutter for each exception of the argument to the graph."
   [state1 goal response]
   {:pre [(acstate? state1) (response? response)]
    :post [(acstate? %)]}
+  ;; (prn "[apply-arg-templates] =" goal)
   (let [subs (:substitutions response)]
     (reduce (fn [s k]
               (let [template (get (:arg-templates s) k)
@@ -188,8 +188,8 @@
                                                   s
                                                   (make-argument
                                                    :id (make-urn)
-                                                   :conclusion `(~'undercut ~(:id arg))
-                                                   :pro true
+                                                   :conclusion `(~'valid ~(:id arg))
+                                                   :pro false
                                                    :strict false
                                                    :weight 0.5
                                                    :premises [e]
@@ -211,19 +211,19 @@
 (defn- apply-asm-templates
   "acstate goal substitutions -> acstate"
   [state1 g1 subs]
-  (reduce (fn [state2 template] 
+  (reduce (fn [state2 template]
             (let [ag (:graph state2)
                   asm (apply-substitutions subs template)]
               (if (not (ground? asm))
                 state2
                 (let [ag2 (assume ag [asm])]
                   (add-goal (assoc state2 :graph ag2)
-                            (make-goal 
+                            (make-goal
                               :issues (list (literal-complement (literal->sliteral asm)))
                               :substitutions subs
                               :depth (inc (:depth g1))))))))
           state1
-          (:asm-templates state1)))      
+          (:asm-templates state1)))
 
 (defn- process-assumptions
   "acstate response -> acstate
@@ -237,8 +237,8 @@
         ]
     (if (empty? asms)
       state
-      (assoc state :asm-templates 
-             (concat (:asm-templates state) 
+      (assoc state :asm-templates
+             (concat (:asm-templates state)
                      (filter (complement ground?) asms))))))
 
 (defn- process-argument
@@ -247,30 +247,30 @@
   (let [arg (:argument response)]
     (cond (nil? arg) state1,
           (ground-argument? arg) (add-argument-to-graph state1 arg),
-          :else (assoc state1 
-                  :arg-templates 
-                  (assoc (:arg-templates state1) 
+          :else (assoc state1
+                  :arg-templates
+                  (assoc (:arg-templates state1)
                     (gensym "at")
                     (make-argument-template
                      :guard `(~'guard ~@(argument-variables arg))
                      :instances #{}
                      :argument arg))))))
-         
+
 (defn- apply-response
   "acstate goal response -> acstate"
   [state1 goal response]
   (-> state1
       (update-issues goal response)
       (process-argument response)
-      (process-assumptions response) 
+      (process-assumptions response)
       (apply-arg-templates goal response)
       (apply-asm-templates goal (:substitutions response))))
 
 (defn select-random-member
   "set -> any
    Select and return a random member of a set"
-  [set] 
-  (let [sq (seq set)] 
+  [set]
+  (let [sq (seq set)]
     (nth sq (rand-int (count sq)))))
 
 (defn- generate-subs-from-basis
@@ -294,6 +294,8 @@
   ;; are passed down to the children of the goal, so they are not lost by removing the goal.
   (let [goal (get (:goals state1) id),
         state2 (remove-goal state1 id)]
+    (debug "goal")
+    ;; (spy goal)
     (if (empty? (:issues goal))
       state2 ; no issues left in the goal
       (let [issue (apply-substitutions (:substitutions goal) (first (:issues goal)))]
@@ -315,6 +317,8 @@
                                                          (generate g (literal-complement issue)
                                                                    (:substitutions goal))))
                                                generators2))]
+              ;; (debug "responses")
+              ;; (spy responses)
               (reduce (fn [s r] (apply-response s goal r))
                       state2
                       responses))))))))
@@ -327,13 +331,25 @@
   [state1 max-goals generators]
   (if (or (empty? (:open-goals state1))
           (<= max-goals 0))
-    state1
-    (let [id (first (:open-goals state1))]   
+    (do
+      (debug "EMPTY GOALS")
+      (debug "EXHAUSTED")
+      state1)
+    (let [id (first (:open-goals state1))]
       (if (not id)
-        state1 
-        (recur (reduce-goal state1 id generators) 
-               (dec max-goals) 
-               generators)))))
+        state1
+        (let [res (reduce-goal state1 id generators)]
+          (debug "reduce-goal is finished")
+          (debug max-goals)
+          (spy (count res))
+          (spy (count (:goals res)))
+          (spy (count (:open-goals res)))
+          ;; (when (< max-goals 270)
+          ;;   (debug "result")
+          ;;   (spy res))
+         (recur res
+                (dec max-goals)
+                generators))))))
 
 (defn- notify-observers
   "Informs generators satisfying the ArgumentConstructionObserver protocol that
@@ -343,17 +359,25 @@
     (when (satisfies? ArgumentConstructionObserver generator)
       (finish generator))))
 
+(defn construct-arguments+
+  "argument-graph (coll-of literal) int (coll-of literal) (seq-of generator) -> argument-graph
+   Construct an argument graph for both sides of a list of issues."
+  ([ag1 issues max-goals facts generators1]
+     (prn "facts=" facts)
+     (let [ag2 (accept ag1 facts)
+           generators2 (cons (builtins) generators1)
+           graph (:graph (reduce-goals (initial-acstate issues ag2)
+                                       max-goals
+                                       generators2))]
+       (notify-observers generators2)
+       graph))
+  ([issue max-goals facts generators]
+     (construct-arguments+ (make-argument-graph) issue max-goals facts generators)))
+
 (defn construct-arguments
   "argument-graph literal int (coll-of literal) (seq-of generator) -> argument-graph
    Construct an argument graph for both sides of an issue."
   ([ag1 issue max-goals facts generators1]
-    (let [ag2 (accept ag1 facts)
-          generators2 (concat (list (builtins)) generators1)
-          graph (:graph (reduce-goals (initial-acstate issue ag2) 
-                                      max-goals 
-                                      generators2))]
-    (notify-observers generators2)
-    graph))
+     (construct-arguments+ ag1 [issue] max-goals facts generators1))
   ([issue max-goals facts generators]
-      (construct-arguments (make-argument-graph) issue max-goals facts generators)))
-
+     (construct-arguments+ (make-argument-graph) [issue] max-goals facts generators)))

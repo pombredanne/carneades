@@ -4,11 +4,12 @@
 (ns carneades.policy-analysis.web.logic.askengine
   (:use clojure.pprint
         carneades.policy-analysis.web.core
-        (carneades.engine aspic argument-evaluation argument-graph ask statement scheme
+        (carneades.engine aspic argument-evaluation argument-graph ask statement theory
                           argument shell unify dialog)
         (carneades.policy-analysis.web.logic questions)
         [clojure.tools.logging :only (info debug error)])
   ;; (:require [carneades.database.argument-graph :as ag-db])
+  (:require [carneades.engine.translation :as tr])
   (:import java.io.File))
 
 (defn get-remaining-questions
@@ -38,15 +39,6 @@
             [{} last-id]
             statements)))
 
-(defn- set-main-issues
-  [ag goal]
-  (let [main-nodes (filter
-                    (fn [s] (= (literal-predicate s) (literal-predicate goal)))
-                    (atomic-statements ag))]
-    (reduce (fn [ag atom] (update-statement-node ag (get-statement-node ag atom) :main true))
-            ag
-            main-nodes)))
-
 (defn- on-questions-answered
   [session]
   (prn "[on-questions-answered]")
@@ -63,8 +55,11 @@
         ;; rejects answers with a weight of 0.0
         rejected-statements (filter (fn [s] ((answers s) 0.0)) answers-statements)
         ag (reject ag rejected-statements)
-        ag (enter-language ag (-> session :policies :language))
+        ag (tr/translate-ag ag (:translator session))
         ag (evaluate aspic-grounded ag)
+        ag (if (fn? (:post-build session))
+             ((:post-build session) ag)
+             ag)
         project (:project session)
         dbname (store-ag project ag)
         session (assoc session
@@ -80,9 +75,9 @@
         [questions id] (get-remaining-questions ag session)]
     (if (empty? questions)
       (on-questions-answered session)
+      ;; some questions still need to be asked:
       (let [questions (vals questions)
             dialog (add-questions (:dialog session) questions)]
-        (prn "remaining =" questions)
         (assoc session
           :last-questions questions
           :last-id id
@@ -90,7 +85,10 @@
 
 (defn- ask-user
   [session]
-  {:pre [(not (nil? (:policies session)))]}
+  {:pre [(not (nil? (:policies session)))
+         (not (nil? (:lang session)))]}
+  (prn "[ask-user]")
+
   (let [{:keys [last-question lang last-id policies]} session
         [last-questions last-id] (get-structured-questions last-question
                                                            lang
@@ -126,7 +124,7 @@
       (prn "[askengine] argument construction is finished!")
       (on-construction-finished session))))
 
-(defn- get-ag-or-next-question
+(defn get-ag-or-next-question
   [session]
   (prn "[get-ag-or-next-question]")
   (cond (:ag session) (on-questions-answered session)

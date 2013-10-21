@@ -38,13 +38,13 @@
   [ag arg]
   (cond (and (in-node? arg) (:pro arg))
         (:arg-pro-applicable-params default-params)
-        
+
         (and (in-node? arg) (:con arg))
         (:arg-con-applicable-params default-params)
-        
+
         (:pro arg)
         (:arg-pro-notapplicable-params default-params)
-        
+
         :else
         (:arg-con-notapplicable-params default-params)))
 
@@ -67,11 +67,6 @@
   (if (:pro arg)
     (add-decorator svgmap argid (make-plusdecorator))
     (add-decorator svgmap argid (make-minusdecorator))))
-
-(defn undercutter?
-  [ag arg]
-  (let [stmtconclusion (map->statement ((:statement-nodes ag) (:conclusion arg)))]
-   (= 'undercut (literal-predicate stmtconclusion))))
 
 (defn scheme->str
   [scheme]
@@ -128,7 +123,7 @@
 
 (defn filter-out-undercutters-conclusions
   [statements]
-  (filter #(not= 'undercut (literal-predicate (map->statement %))) statements))
+  (filter #(not= 'valid (literal-predicate (map->statement %))) statements))
 
 (defn add-entities
   [svgmap ag stmt-str]
@@ -187,7 +182,6 @@
         layouttype (get options :layout :hierarchical)
         svgmap (graph :width width :height height)
         svgmap (add-markers svgmap)
-        ag (apply subset-ag ag options)
         svgmap (add-entities svgmap ag stmt-str)
         svgmap (link-entities svgmap ag)
         optionsseq (flatten (seq options))
